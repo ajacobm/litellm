@@ -111,7 +111,7 @@ class ModelInfo(BaseModel):
             id = str(id)
         super().__init__(id=id, **params)
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(protected_namespaces=(), extra="allow")
 
     def __contains__(self, key):
         # Define custom behavior for the 'in' operator

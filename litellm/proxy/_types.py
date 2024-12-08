@@ -553,6 +553,7 @@ class ProxyChatCompletionRequest(LiteLLMBase):
     request_timeout: Optional[int] = None
 
     model_config = ConfigDict(
+        protected_namespaces=(),
         extra="allow"
     )  # allow params not defined here, these fall in litellm.completion(**kwargs)
 
@@ -1142,6 +1143,7 @@ class TeamDefaultSettings(LiteLLMBase):
     team_id: str
 
     model_config = ConfigDict(
+        protected_namespaces=(),
         extra="allow"
     )  # allow params not defined here, these fall in litellm.completion(**kwargs)
 

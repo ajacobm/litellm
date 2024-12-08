@@ -53,7 +53,7 @@ class GuardrailItem(BaseModel):
     callback_args: Dict[str, Dict]
     enabled_roles: Optional[List[Role]]
 
-    model_config = ConfigDict(use_enum_values=True)
+    model_config = ConfigDict(use_enum_values=True, protected_namespaces=())
 
     def __init__(
         self,
