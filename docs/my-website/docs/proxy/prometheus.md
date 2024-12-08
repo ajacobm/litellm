@@ -134,8 +134,9 @@ Use this for LLM API Error monitoring and tracking remaining rate limits and tok
 
 | Metric Name          | Description                          |
 |----------------------|--------------------------------------|
-| `litellm_request_total_latency_metric`             | Total latency (seconds) for a request to LiteLLM Proxy Server - tracked for labels `litellm_call_id`, `model`, `user_api_key`, `user_api_key_alias`, `user_api_team`, `user_api_team_alias` |
-| `litellm_llm_api_latency_metric`             | Latency (seconds) for just the LLM API call - tracked for labels `litellm_call_id`, `model`, `user_api_key`, `user_api_key_alias`, `user_api_team`, `user_api_team_alias` |
+| `litellm_request_total_latency_metric`             | Total latency (seconds) for a request to LiteLLM Proxy Server - tracked for labels `model`, `hashed_api_key`, `api_key_alias`, `team`, `team_alias` |
+| `litellm_llm_api_latency_metric`             | Latency (seconds) for just the LLM API call - tracked for labels `model`, `hashed_api_key`, `api_key_alias`, `team`, `team_alias` |
+| `litellm_llm_api_time_to_first_token_metric`             | Time to first token for LLM API call - tracked for labels `model`, `hashed_api_key`, `api_key_alias`, `team`, `team_alias` [Note: only emitted for streaming requests] |
 
 ## Virtual Key - Budget, Rate Limit Metrics
 
@@ -191,3 +192,13 @@ Here is a screenshot of the metrics you can monitor with the LiteLLM Grafana Das
 |----------------------|--------------------------------------|
 | `litellm_llm_api_failed_requests_metric`             | **deprecated** use `litellm_proxy_failed_requests_metric` |
 | `litellm_requests_metric`             | **deprecated** use `litellm_proxy_total_requests_metric` |
+
+
+## FAQ 
+
+### What are `_created` vs. `_total` metrics?
+
+- `_created` metrics are metrics that are created when the proxy starts
+- `_total` metrics are metrics that are incremented for each request
+
+You should consume the `_total` metrics for your counting purposes

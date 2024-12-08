@@ -242,12 +242,12 @@ async def test_single_deployment_no_cooldowns_test_prod_mock_completion_calls():
             pass
 
     cooldown_list = await _async_get_cooldown_deployments(
-        litellm_router_instance=router
+        litellm_router_instance=router, parent_otel_span=None
     )
     assert len(cooldown_list) == 0
 
     healthy_deployments, _ = await router._async_get_healthy_deployments(
-        model="gpt-3.5-turbo"
+        model="gpt-3.5-turbo", parent_otel_span=None
     )
 
     print("healthy_deployments: ", healthy_deployments)
@@ -351,7 +351,7 @@ async def test_high_traffic_cooldowns_all_healthy_deployments():
     print("model_stats: ", model_stats)
 
     cooldown_list = await _async_get_cooldown_deployments(
-        litellm_router_instance=router
+        litellm_router_instance=router, parent_otel_span=None
     )
     assert len(cooldown_list) == 0
 
@@ -449,7 +449,7 @@ async def test_high_traffic_cooldowns_one_bad_deployment():
     print("model_stats: ", model_stats)
 
     cooldown_list = await _async_get_cooldown_deployments(
-        litellm_router_instance=router
+        litellm_router_instance=router, parent_otel_span=None
     )
     assert len(cooldown_list) == 1
 
@@ -550,7 +550,7 @@ async def test_high_traffic_cooldowns_one_rate_limited_deployment():
     print("model_stats: ", model_stats)
 
     cooldown_list = await _async_get_cooldown_deployments(
-        litellm_router_instance=router
+        litellm_router_instance=router, parent_otel_span=None
     )
     assert len(cooldown_list) == 1
 
@@ -560,3 +560,34 @@ Unit tests for router set_cooldowns
 
 1. _set_cooldown_deployments() will cooldown a deployment after it fails 50% requests
 """
+
+
+def test_router_fallbacks_with_cooldowns_and_model_id():
+    router = Router(
+        model_list=[
+            {
+                "model_name": "gpt-3.5-turbo",
+                "litellm_params": {"model": "gpt-3.5-turbo", "rpm": 1},
+                "model_info": {
+                    "id": "123",
+                },
+            }
+        ],
+        routing_strategy="usage-based-routing-v2",
+        fallbacks=[{"gpt-3.5-turbo": ["123"]}],
+    )
+
+    ## trigger ratelimit
+    try:
+        router.completion(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": "hi"}],
+            mock_response="litellm.RateLimitError",
+        )
+    except litellm.RateLimitError:
+        pass
+
+    router.completion(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": "hi"}],
+    )

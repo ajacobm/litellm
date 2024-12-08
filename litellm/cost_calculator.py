@@ -22,11 +22,14 @@ from litellm.litellm_core_utils.llm_cost_calc.utils import _generic_cost_per_cha
 from litellm.llms.anthropic.cost_calculation import (
     cost_per_token as anthropic_cost_per_token,
 )
+from litellm.llms.azure.cost_calculation import (
+    cost_per_token as azure_openai_cost_per_token,
+)
 from litellm.llms.azure_ai.cost_calculator import (
     cost_per_query as azure_ai_rerank_cost_per_query,
 )
-from litellm.llms.AzureOpenAI.cost_calculation import (
-    cost_per_token as azure_openai_cost_per_token,
+from litellm.llms.bedrock.image.cost_calculator import (
+    cost_calculator as bedrock_image_cost_calculator,
 )
 from litellm.llms.cohere.cost_calculator import (
     cost_per_query as cohere_rerank_cost_per_query,
@@ -43,6 +46,9 @@ from litellm.llms.OpenAI.cost_calculation import (
 from litellm.llms.OpenAI.cost_calculation import cost_per_token as openai_cost_per_token
 from litellm.llms.OpenAI.cost_calculation import cost_router as openai_cost_router
 from litellm.llms.together_ai.cost_calculator import get_model_params_and_category
+from litellm.llms.vertex_ai_and_google_ai_studio.image_generation.cost_calculator import (
+    cost_calculator as vertex_ai_image_cost_calculator,
+)
 from litellm.types.llms.openai import HttpxBinaryResponseContent
 from litellm.types.rerank import RerankResponse
 from litellm.types.router import SPECIAL_MODEL_INFO_PARAMS
@@ -168,7 +174,6 @@ def cost_per_token(  # noqa: PLR0915
                 model_with_provider = model_with_provider_and_region
     else:
         _, custom_llm_provider, _, _ = litellm.get_llm_provider(model=model)
-
     model_without_prefix = model
     model_parts = model.split("/", 1)
     if len(model_parts) > 1:
@@ -278,142 +283,48 @@ def cost_per_token(  # noqa: PLR0915
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
         )
-    elif model in model_cost_ref:
-        print_verbose(f"Success: model={model} in model_cost_map")
-        print_verbose(
-            f"prompt_tokens={prompt_tokens}; completion_tokens={completion_tokens}"
+    else:
+        model_info = litellm.get_model_info(
+            model=model, custom_llm_provider=custom_llm_provider
         )
-        if (
-            model_cost_ref[model].get("input_cost_per_token", None) is not None
-            and model_cost_ref[model].get("output_cost_per_token", None) is not None
-        ):
+
+        if model_info["input_cost_per_token"] > 0:
             ## COST PER TOKEN ##
             prompt_tokens_cost_usd_dollar = (
-                model_cost_ref[model]["input_cost_per_token"] * prompt_tokens
-            )
-            completion_tokens_cost_usd_dollar = (
-                model_cost_ref[model]["output_cost_per_token"] * completion_tokens
+                model_info["input_cost_per_token"] * prompt_tokens
             )
         elif (
-            model_cost_ref[model].get("output_cost_per_second", None) is not None
+            model_info.get("input_cost_per_second", None) is not None
             and response_time_ms is not None
         ):
             print_verbose(
-                f"For model={model} - output_cost_per_second: {model_cost_ref[model].get('output_cost_per_second')}; response time: {response_time_ms}"
-            )
-            ## COST PER SECOND ##
-            prompt_tokens_cost_usd_dollar = 0
-            completion_tokens_cost_usd_dollar = (
-                model_cost_ref[model]["output_cost_per_second"]
-                * response_time_ms
-                / 1000
-            )
-        elif (
-            model_cost_ref[model].get("input_cost_per_second", None) is not None
-            and response_time_ms is not None
-        ):
-            print_verbose(
-                f"For model={model} - input_cost_per_second: {model_cost_ref[model].get('input_cost_per_second')}; response time: {response_time_ms}"
+                f"For model={model} - input_cost_per_second: {model_info.get('input_cost_per_second')}; response time: {response_time_ms}"
             )
             ## COST PER SECOND ##
             prompt_tokens_cost_usd_dollar = (
-                model_cost_ref[model]["input_cost_per_second"] * response_time_ms / 1000
+                model_info["input_cost_per_second"] * response_time_ms / 1000  # type: ignore
             )
-            completion_tokens_cost_usd_dollar = 0.0
+
+        if model_info["output_cost_per_token"] > 0:
+            completion_tokens_cost_usd_dollar = (
+                model_info["output_cost_per_token"] * completion_tokens
+            )
+        elif (
+            model_info.get("output_cost_per_second", None) is not None
+            and response_time_ms is not None
+        ):
+            print_verbose(
+                f"For model={model} - output_cost_per_second: {model_info.get('output_cost_per_second')}; response time: {response_time_ms}"
+            )
+            ## COST PER SECOND ##
+            completion_tokens_cost_usd_dollar = (
+                model_info["output_cost_per_second"] * response_time_ms / 1000  # type: ignore
+            )
+
         print_verbose(
             f"Returned custom cost for model={model} - prompt_tokens_cost_usd_dollar: {prompt_tokens_cost_usd_dollar}, completion_tokens_cost_usd_dollar: {completion_tokens_cost_usd_dollar}"
         )
         return prompt_tokens_cost_usd_dollar, completion_tokens_cost_usd_dollar
-    elif "ft:gpt-3.5-turbo" in model:
-        print_verbose(f"Cost Tracking: {model} is an OpenAI FinteTuned LLM")
-        # fuzzy match ft:gpt-3.5-turbo:abcd-id-cool-litellm
-        prompt_tokens_cost_usd_dollar = (
-            model_cost_ref["ft:gpt-3.5-turbo"]["input_cost_per_token"] * prompt_tokens
-        )
-        completion_tokens_cost_usd_dollar = (
-            model_cost_ref["ft:gpt-3.5-turbo"]["output_cost_per_token"]
-            * completion_tokens
-        )
-        return prompt_tokens_cost_usd_dollar, completion_tokens_cost_usd_dollar
-    elif "ft:gpt-4-0613" in model:
-        print_verbose(f"Cost Tracking: {model} is an OpenAI FinteTuned LLM")
-        # fuzzy match ft:gpt-4-0613:abcd-id-cool-litellm
-        prompt_tokens_cost_usd_dollar = (
-            model_cost_ref["ft:gpt-4-0613"]["input_cost_per_token"] * prompt_tokens
-        )
-        completion_tokens_cost_usd_dollar = (
-            model_cost_ref["ft:gpt-4-0613"]["output_cost_per_token"] * completion_tokens
-        )
-        return prompt_tokens_cost_usd_dollar, completion_tokens_cost_usd_dollar
-    elif "ft:gpt-4o-2024-05-13" in model:
-        print_verbose(f"Cost Tracking: {model} is an OpenAI FinteTuned LLM")
-        # fuzzy match ft:gpt-4o-2024-05-13:abcd-id-cool-litellm
-        prompt_tokens_cost_usd_dollar = (
-            model_cost_ref["ft:gpt-4o-2024-05-13"]["input_cost_per_token"]
-            * prompt_tokens
-        )
-        completion_tokens_cost_usd_dollar = (
-            model_cost_ref["ft:gpt-4o-2024-05-13"]["output_cost_per_token"]
-            * completion_tokens
-        )
-        return prompt_tokens_cost_usd_dollar, completion_tokens_cost_usd_dollar
-
-    elif "ft:davinci-002" in model:
-        print_verbose(f"Cost Tracking: {model} is an OpenAI FinteTuned LLM")
-        # fuzzy match ft:davinci-002:abcd-id-cool-litellm
-        prompt_tokens_cost_usd_dollar = (
-            model_cost_ref["ft:davinci-002"]["input_cost_per_token"] * prompt_tokens
-        )
-        completion_tokens_cost_usd_dollar = (
-            model_cost_ref["ft:davinci-002"]["output_cost_per_token"]
-            * completion_tokens
-        )
-        return prompt_tokens_cost_usd_dollar, completion_tokens_cost_usd_dollar
-    elif "ft:babbage-002" in model:
-        print_verbose(f"Cost Tracking: {model} is an OpenAI FinteTuned LLM")
-        # fuzzy match ft:babbage-002:abcd-id-cool-litellm
-        prompt_tokens_cost_usd_dollar = (
-            model_cost_ref["ft:babbage-002"]["input_cost_per_token"] * prompt_tokens
-        )
-        completion_tokens_cost_usd_dollar = (
-            model_cost_ref["ft:babbage-002"]["output_cost_per_token"]
-            * completion_tokens
-        )
-        return prompt_tokens_cost_usd_dollar, completion_tokens_cost_usd_dollar
-    elif model in litellm.azure_llms:
-        verbose_logger.debug(f"Cost Tracking: {model} is an Azure LLM")
-        model = litellm.azure_llms[model]
-        verbose_logger.debug(
-            f"applying cost={model_cost_ref[model]['input_cost_per_token']} for prompt_tokens={prompt_tokens}"
-        )
-        prompt_tokens_cost_usd_dollar = (
-            model_cost_ref[model]["input_cost_per_token"] * prompt_tokens
-        )
-        verbose_logger.debug(
-            f"applying cost={model_cost_ref[model]['output_cost_per_token']} for completion_tokens={completion_tokens}"
-        )
-        completion_tokens_cost_usd_dollar = (
-            model_cost_ref[model]["output_cost_per_token"] * completion_tokens
-        )
-        return prompt_tokens_cost_usd_dollar, completion_tokens_cost_usd_dollar
-    elif model in litellm.azure_embedding_models:
-        verbose_logger.debug(f"Cost Tracking: {model} is an Azure Embedding Model")
-        model = litellm.azure_embedding_models[model]
-        prompt_tokens_cost_usd_dollar = (
-            model_cost_ref[model]["input_cost_per_token"] * prompt_tokens
-        )
-        completion_tokens_cost_usd_dollar = (
-            model_cost_ref[model]["output_cost_per_token"] * completion_tokens
-        )
-        return prompt_tokens_cost_usd_dollar, completion_tokens_cost_usd_dollar
-    else:
-        # if model is not in model_prices_and_context_window.json. Raise an exception-let users know
-        error_str = f"Model not in model_prices_and_context_window.json. You passed model={model}, custom_llm_provider={custom_llm_provider}. Register pricing for model - https://docs.litellm.ai/docs/proxy/custom_pricing\n"
-        raise litellm.exceptions.NotFoundError(  # type: ignore
-            message=error_str,
-            model=model,
-            llm_provider="",
-        )
 
 
 def get_replicate_completion_pricing(completion_response: dict, total_time=0.0):
@@ -451,7 +362,6 @@ def _select_model_name_for_cost_calc(
 
     if base_model is not None:
         return base_model
-
     return_model = model
     if isinstance(completion_response, str):
         return return_model
@@ -521,12 +431,13 @@ def completion_cost(  # noqa: PLR0915
     custom_llm_provider=None,
     region_name=None,  # used for bedrock pricing
     ### IMAGE GEN ###
-    size=None,
+    size: Optional[str] = None,
     quality=None,
     n=None,  # number of images
     ### CUSTOM PRICING ###
     custom_cost_per_token: Optional[CostPerToken] = None,
     custom_cost_per_second: Optional[float] = None,
+    optional_params: Optional[dict] = None,
 ) -> float:
     """
     Calculate the cost of a given completion call fot GPT-3.5-turbo, llama2, any litellm supported llm.
@@ -616,7 +527,8 @@ def completion_cost(  # noqa: PLR0915
                 f"completion_response response ms: {getattr(completion_response, '_response_ms', None)} "
             )
             model = _select_model_name_for_cost_calc(
-                model=model, completion_response=completion_response
+                model=model,
+                completion_response=completion_response,
             )
             hidden_params = getattr(completion_response, "_hidden_params", None)
             if hidden_params is not None:
@@ -664,10 +576,22 @@ def completion_cost(  # noqa: PLR0915
         ):
             ### IMAGE GENERATION COST CALCULATION ###
             if custom_llm_provider == "vertex_ai":
-                # https://cloud.google.com/vertex-ai/generative-ai/pricing
-                # Vertex Charges Flat $0.20 per image
-                return 0.020
-
+                if isinstance(completion_response, ImageResponse):
+                    return vertex_ai_image_cost_calculator(
+                        model=model,
+                        image_response=completion_response,
+                    )
+            elif custom_llm_provider == "bedrock":
+                if isinstance(completion_response, ImageResponse):
+                    return bedrock_image_cost_calculator(
+                        model=model,
+                        size=size,
+                        image_response=completion_response,
+                        optional_params=optional_params,
+                    )
+                raise TypeError(
+                    "completion_response must be of type ImageResponse for bedrock image cost calculation"
+                )
             if size is None:
                 size = "1024-x-1024"  # openai default
             # fix size to match naming convention
@@ -677,9 +601,9 @@ def completion_cost(  # noqa: PLR0915
             image_gen_model_name_with_quality = image_gen_model_name
             if quality is not None:
                 image_gen_model_name_with_quality = f"{quality}/{image_gen_model_name}"
-            size = size.split("-x-")
-            height = int(size[0])  # if it's 1024-x-1024 vs. 1024x1024
-            width = int(size[1])
+            size_parts = size.split("-x-")
+            height = int(size_parts[0])  # if it's 1024-x-1024 vs. 1024x1024
+            width = int(size_parts[1])
             verbose_logger.debug(f"image_gen_model_name: {image_gen_model_name}")
             verbose_logger.debug(
                 f"image_gen_model_name_with_quality: {image_gen_model_name_with_quality}"
@@ -839,11 +763,14 @@ def response_cost_calculator(
             if isinstance(response_object, BaseModel):
                 response_object._hidden_params["optional_params"] = optional_params
             if isinstance(response_object, ImageResponse):
+                if base_model is not None:
+                    model = base_model
                 response_cost = completion_cost(
                     completion_response=response_object,
                     model=model,
                     call_type=call_type,
                     custom_llm_provider=custom_llm_provider,
+                    optional_params=optional_params,
                 )
             else:
                 if custom_pricing is True:  # override defaults if custom pricing is set

@@ -2,17 +2,27 @@ import enum
 import json
 import os
 import sys
+import traceback
 import uuid
 from dataclasses import fields
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Union
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Extra, Field, Json, model_validator
 from typing_extensions import Annotated, TypedDict
 
 from litellm.types.integrations.slack_alerting import AlertType
 from litellm.types.router import RouterErrors, UpdateRouterConfig
-from litellm.types.utils import ProviderField, StandardCallbackDynamicParams
+from litellm.types.utils import (
+    EmbeddingResponse,
+    ImageResponse,
+    ModelResponse,
+    ProviderField,
+    StandardCallbackDynamicParams,
+    StandardPassThroughResponseObject,
+    TextCompletionResponse,
+)
 
 if TYPE_CHECKING:
     from opentelemetry.trace import Span as _Span
@@ -104,7 +114,7 @@ class LitellmUserRoles(str, enum.Enum):
         return ui_labels.get(self.value, "")
 
 
-class LitellmTableNames(enum.Enum):
+class LitellmTableNames(str, enum.Enum):
     """
     Enum for Table Names used by LiteLLM
     """
@@ -278,6 +288,7 @@ class LiteLLMRoutes(enum.Enum):
 
     management_routes = [  # key
         "/key/generate",
+        "/key/{token_id}/regenerate",
         "/key/update",
         "/key/delete",
         "/key/info",
@@ -339,10 +350,7 @@ class LiteLLMRoutes(enum.Enum):
         "/sso",
         "/sso/get/ui_settings",
         "/login",
-        "/key/generate",
-        "/key/update",
         "/key/info",
-        "/key/delete",
         "/config",
         "/spend",
         "/user",
@@ -363,6 +371,7 @@ class LiteLLMRoutes(enum.Enum):
     internal_user_routes = (
         [
             "/key/generate",
+            "/key/{token_id}/regenerate",
             "/key/update",
             "/key/delete",
             "/key/health",
@@ -435,15 +444,7 @@ class LiteLLM_JWTAuth(LiteLLMBase):
     """
 
     admin_jwt_scope: str = "litellm_proxy_admin"
-    admin_allowed_routes: List[
-        Literal[
-            "openai_routes",
-            "info_routes",
-            "management_routes",
-            "spend_tracking_routes",
-            "global_spend_tracking_routes",
-        ]
-    ] = [
+    admin_allowed_routes: List[str] = [
         "management_routes",
         "spend_tracking_routes",
         "global_spend_tracking_routes",
@@ -633,6 +634,8 @@ class GenerateRequestBase(LiteLLMBase):
     Overlapping schema between key and user generate/update requests
     """
 
+    key_alias: Optional[str] = None
+    duration: Optional[str] = None
     models: Optional[list] = []
     spend: Optional[float] = 0
     max_budget: Optional[float] = None
@@ -645,13 +648,6 @@ class GenerateRequestBase(LiteLLMBase):
     budget_duration: Optional[str] = None
     allowed_cache_controls: Optional[list] = []
     soft_budget: Optional[float] = None
-
-
-class _GenerateKeyRequest(GenerateRequestBase):
-    key_alias: Optional[str] = None
-    key: Optional[str] = None
-    duration: Optional[str] = None
-    aliases: Optional[dict] = {}
     config: Optional[dict] = {}
     permissions: Optional[dict] = {}
     model_max_budget: Optional[dict] = (
@@ -664,10 +660,16 @@ class _GenerateKeyRequest(GenerateRequestBase):
     model_tpm_limit: Optional[dict] = None
     guardrails: Optional[List[str]] = None
     blocked: Optional[bool] = None
+    aliases: Optional[dict] = {}
+
+
+class _GenerateKeyRequest(GenerateRequestBase):
+    key: Optional[str] = None
 
 
 class GenerateKeyRequest(_GenerateKeyRequest):
     tags: Optional[List[str]] = None
+    enforced_params: Optional[List[str]] = None
 
 
 class GenerateKeyResponse(_GenerateKeyRequest):
@@ -722,14 +724,14 @@ class KeyRequest(LiteLLMBase):
 
 
 class LiteLLM_ModelTable(LiteLLMBase):
-    model_aliases: Optional[str] = None  # json dump the dict
+    model_aliases: Optional[Union[str, dict]] = None  # json dump the dict
     created_by: str
     updated_by: str
 
     model_config = ConfigDict(protected_namespaces=())
 
 
-class NewUserRequest(_GenerateKeyRequest):
+class NewUserRequest(GenerateRequestBase):
     max_budget: Optional[float] = None
     user_email: Optional[str] = None
     user_alias: Optional[str] = None
@@ -796,7 +798,51 @@ class DeleteUserRequest(LiteLLMBase):
 AllowedModelRegion = Literal["eu", "us"]
 
 
-class NewCustomerRequest(LiteLLMBase):
+class BudgetNew(LiteLLMBase):
+    budget_id: Optional[str] = Field(default=None, description="The unique budget id.")
+    max_budget: Optional[float] = Field(
+        default=None,
+        description="Requests will fail if this budget (in USD) is exceeded.",
+    )
+    soft_budget: Optional[float] = Field(
+        default=None,
+        description="Requests will NOT fail if this is exceeded. Will fire alerting though.",
+    )
+    max_parallel_requests: Optional[int] = Field(
+        default=None, description="Max concurrent requests allowed for this budget id."
+    )
+    tpm_limit: Optional[int] = Field(
+        default=None, description="Max tokens per minute, allowed for this budget id."
+    )
+    rpm_limit: Optional[int] = Field(
+        default=None, description="Max requests per minute, allowed for this budget id."
+    )
+    budget_duration: Optional[str] = Field(
+        default=None,
+        description="Max duration budget should be set for (e.g. '1hr', '1d', '28d')",
+    )
+
+
+class BudgetRequest(LiteLLMBase):
+    budgets: List[str]
+
+
+class BudgetDeleteRequest(LiteLLMBase):
+    id: str
+
+
+class CustomerBase(LiteLLMBase):
+    user_id: str
+    alias: Optional[str] = None
+    spend: float = 0.0
+    allowed_model_region: Optional[AllowedModelRegion] = None
+    default_model: Optional[str] = None
+    budget_id: Optional[str] = None
+    litellm_budget_table: Optional[BudgetNew] = None
+    blocked: bool = False
+
+
+class NewCustomerRequest(BudgetNew):
     """
     Create a new customer, allocate a budget to them
     """
@@ -804,7 +850,6 @@ class NewCustomerRequest(LiteLLMBase):
     user_id: str
     alias: Optional[str] = None  # human-friendly alias
     blocked: bool = False  # allow/disallow requests for this end-user
-    max_budget: Optional[float] = None
     budget_id: Optional[str] = None  # give either a budget_id or max_budget
     allowed_model_region: Optional[AllowedModelRegion] = (
         None  # require all user requests to use models in this specific region
@@ -849,15 +894,7 @@ class DeleteCustomerRequest(LiteLLMBase):
     user_ids: List[str]
 
 
-class Member(LiteLLMBase):
-    role: Literal[
-        LitellmUserRoles.ORG_ADMIN,
-        LitellmUserRoles.INTERNAL_USER,
-        LitellmUserRoles.INTERNAL_USER_VIEW_ONLY,
-        # older Member roles
-        "admin",
-        "user",
-    ]
+class MemberBase(LiteLLMBase):
     user_id: Optional[str] = None
     user_email: Optional[str] = None
 
@@ -869,6 +906,21 @@ class Member(LiteLLMBase):
         if values.get("user_id") is None and values.get("user_email") is None:
             raise ValueError("Either user id or user email must be provided")
         return values
+
+
+class Member(MemberBase):
+    role: Literal[
+        "admin",
+        "user",
+    ]
+
+
+class OrgMember(MemberBase):
+    role: Literal[
+        LitellmUserRoles.ORG_ADMIN,
+        LitellmUserRoles.INTERNAL_USER,
+        LitellmUserRoles.INTERNAL_USER_VIEW_ONLY,
+    ]
 
 
 class TeamBase(LiteLLMBase):
@@ -930,6 +982,7 @@ class UpdateTeamRequest(LiteLLMBase):
     blocked: Optional[bool] = None
     budget_duration: Optional[str] = None
     tags: Optional[list] = None
+    model_aliases: Optional[dict] = None
 
 
 class ResetTeamBudgetRequest(LiteLLMBase):
@@ -962,7 +1015,9 @@ class BlockKeyRequest(LiteLLMBase):
 
 class AddTeamCallback(LiteLLMBase):
     callback_name: str
-    callback_type: Literal["success", "failure", "success_and_failure"]
+    callback_type: Optional[Literal["success", "failure", "success_and_failure"]] = (
+        "success_and_failure"
+    )
     callback_vars: Dict[str, str]
 
     @model_validator(mode="before")
@@ -970,11 +1025,13 @@ class AddTeamCallback(LiteLLMBase):
     def validate_callback_vars(cls, values):
         callback_vars = values.get("callback_vars", {})
         valid_keys = set(StandardCallbackDynamicParams.__annotations__.keys())
-        for key in callback_vars:
+        for key, value in callback_vars.items():
             if key not in valid_keys:
                 raise ValueError(
                     f"Invalid callback variable: {key}. Must be one of {valid_keys}"
                 )
+            if not isinstance(value, str):
+                callback_vars[key] = str(value)
         return values
 
 
@@ -1004,6 +1061,7 @@ class LiteLLM_TeamTable(TeamBase):
     budget_duration: Optional[str] = None
     budget_reset_at: Optional[datetime] = None
     model_id: Optional[int] = None
+    litellm_model_table: Optional[LiteLLM_ModelTable] = None
 
     model_config = ConfigDict(protected_namespaces=())
 
@@ -1093,39 +1151,6 @@ class OrganizationRequest(LiteLLMBase):
     organizations: List[str]
 
 
-class BudgetNew(LiteLLMBase):
-    budget_id: str = Field(default=None, description="The unique budget id.")
-    max_budget: Optional[float] = Field(
-        default=None,
-        description="Requests will fail if this budget (in USD) is exceeded.",
-    )
-    soft_budget: Optional[float] = Field(
-        default=None,
-        description="Requests will NOT fail if this is exceeded. Will fire alerting though.",
-    )
-    max_parallel_requests: Optional[int] = Field(
-        default=None, description="Max concurrent requests allowed for this budget id."
-    )
-    tpm_limit: Optional[int] = Field(
-        default=None, description="Max tokens per minute, allowed for this budget id."
-    )
-    rpm_limit: Optional[int] = Field(
-        default=None, description="Max requests per minute, allowed for this budget id."
-    )
-    budget_duration: Optional[str] = Field(
-        default=None,
-        description="Max duration budget should be set for (e.g. '1hr', '1d', '28d')",
-    )
-
-
-class BudgetRequest(LiteLLMBase):
-    budgets: List[str]
-
-
-class BudgetDeleteRequest(LiteLLMBase):
-    id: str
-
-
 class KeyManagementSystem(enum.Enum):
     GOOGLE_KMS = "google_kms"
     AZURE_KEY_VAULT = "azure_key_vault"
@@ -1136,7 +1161,20 @@ class KeyManagementSystem(enum.Enum):
 
 
 class KeyManagementSettings(LiteLLMBase):
-    hosted_keys: List
+    hosted_keys: Optional[List] = None
+    store_virtual_keys: Optional[bool] = False
+    """
+    If True, virtual keys created by litellm will be stored in the secret manager
+    """
+    prefix_for_stored_virtual_keys: str = "litellm/"
+    """
+    If set, this prefix will be used for stored virtual keys in the secret manager
+    """
+
+    access_mode: Literal["read_only", "write_only", "read_and_write"] = "read_only"
+    """
+    Access mode for the secret manager, when write_only will only use for writing secrets
+    """
 
 
 class TeamDefaultSettings(LiteLLMBase):
@@ -1373,6 +1411,8 @@ class LiteLLM_VerificationToken(LiteLLMBase):
     blocked: Optional[bool] = None
     litellm_budget_table: Optional[dict] = None
     org_id: Optional[str] = None  # org id for a given key
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
     model_config = ConfigDict(protected_namespaces=())
 
@@ -1418,6 +1458,8 @@ class UserAPIKeyAuth(
     parent_otel_span: Optional[Span] = None
     rpm_limit_per_model: Optional[Dict[str, int]] = None
     tpm_limit_per_model: Optional[Dict[str, int]] = None
+    user_tpm_limit: Optional[int] = None
+    user_rpm_limit: Optional[int] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -1775,6 +1817,7 @@ class SpendLogsPayload(TypedDict):
     team_id: Optional[str]
     end_user: Optional[str]
     requester_ip_address: Optional[str]
+    custom_llm_provider: Optional[str]
 
 
 class SpanAttributes(str, enum.Enum):
@@ -1899,6 +1942,10 @@ class ProxyErrorTypes(str, enum.Enum):
     auth_error = "auth_error"
     internal_server_error = "internal_server_error"
     bad_request_error = "bad_request_error"
+    not_found_error = "not_found_error"
+
+
+DB_CONNECTION_ERROR_TYPES = (httpx.ConnectError, httpx.ReadError, httpx.ReadTimeout)
 
 
 class SSOUserDefinedValues(TypedDict):
@@ -1946,6 +1993,25 @@ class MemberAddRequest(LiteLLMBase):
         elif isinstance(member_data, dict):
             # If member is a dictionary, convert it to a single Member object
             member = Member(**member_data)
+            # Replace member_data with the single Member object
+            data["member"] = member
+        # Call the superclass __init__ method to initialize the object
+        super().__init__(**data)
+
+
+class OrgMemberAddRequest(LiteLLMBase):
+    member: Union[List[OrgMember], OrgMember]
+
+    def __init__(self, **data):
+        member_data = data.get("member")
+        if isinstance(member_data, list):
+            # If member is a list of dictionaries, convert each dictionary to a Member object
+            members = [OrgMember(**item) for item in member_data]
+            # Replace member_data with the list of Member objects
+            data["member"] = members
+        elif isinstance(member_data, dict):
+            # If member is a dictionary, convert it to a single Member object
+            member = OrgMember(**member_data)
             # Replace member_data with the single Member object
             data["member"] = member
         # Call the superclass __init__ method to initialize the object
@@ -2000,7 +2066,7 @@ class TeamMemberUpdateResponse(MemberUpdateResponse):
 
 
 # Organization Member Requests
-class OrganizationMemberAddRequest(MemberAddRequest):
+class OrganizationMemberAddRequest(OrgMemberAddRequest):
     organization_id: str
     max_budget_in_organization: Optional[float] = (
         None  # Users max budget within the organization
@@ -2032,6 +2098,7 @@ class TeamInfoResponseObject(TypedDict):
 
 class TeamListResponseObject(LiteLLM_TeamTable):
     team_memberships: List[LiteLLM_TeamMembership]
+    keys: List  # list of keys that belong to the team
 
 
 class CurrentItemRateLimit(TypedDict):
@@ -2057,6 +2124,7 @@ class SpecialHeaders(enum.Enum):
     openai_authorization = "Authorization"
     azure_authorization = "API-Key"
     anthropic_authorization = "x-api-key"
+    google_ai_studio_authorization = "x-goog-api-key"
 
 
 class LitellmDataForBackendLLMCall(TypedDict, total=False):
@@ -2073,3 +2141,90 @@ JWKKeyValue = Union[List[JWTKeyItem], JWTKeyItem]
 
 class JWKUrlResponse(TypedDict, total=False):
     keys: JWKKeyValue
+
+
+class UserManagementEndpointParamDocStringEnums(str, enum.Enum):
+    user_id_doc_str = (
+        "Optional[str] - Specify a user id. If not set, a unique id will be generated."
+    )
+    user_alias_doc_str = (
+        "Optional[str] - A descriptive name for you to know who this user id refers to."
+    )
+    teams_doc_str = "Optional[list] - specify a list of team id's a user belongs to."
+    user_email_doc_str = "Optional[str] - Specify a user email."
+    send_invite_email_doc_str = (
+        "Optional[bool] - Specify if an invite email should be sent."
+    )
+    user_role_doc_str = """Optional[str] - Specify a user role - "proxy_admin", "proxy_admin_viewer", "internal_user", "internal_user_viewer", "team", "customer". Info about each role here: `https://github.com/BerriAI/litellm/litellm/proxy/_types.py#L20`"""
+    max_budget_doc_str = """Optional[float] - Specify max budget for a given user."""
+    budget_duration_doc_str = """Optional[str] - Budget is reset at the end of specified duration. If not set, budget is never reset. You can set duration as seconds ("30s"), minutes ("30m"), hours ("30h"), days ("30d"), months ("1mo")."""
+    models_doc_str = """Optional[list] - Model_name's a user is allowed to call. (if empty, key is allowed to call all models)"""
+    tpm_limit_doc_str = (
+        """Optional[int] - Specify tpm limit for a given user (Tokens per minute)"""
+    )
+    rpm_limit_doc_str = (
+        """Optional[int] - Specify rpm limit for a given user (Requests per minute)"""
+    )
+    auto_create_key_doc_str = """bool - Default=True. Flag used for returning a key as part of the /user/new response"""
+    aliases_doc_str = """Optional[dict] - Model aliases for the user - [Docs](https://litellm.vercel.app/docs/proxy/virtual_keys#model-aliases)"""
+    config_doc_str = """Optional[dict] - [DEPRECATED PARAM] User-specific config."""
+    allowed_cache_controls_doc_str = """Optional[list] - List of allowed cache control values. Example - ["no-cache", "no-store"]. See all values - https://docs.litellm.ai/docs/proxy/caching#turn-on--off-caching-per-request-"""
+    blocked_doc_str = (
+        """Optional[bool] - [Not Implemented Yet] Whether the user is blocked."""
+    )
+    guardrails_doc_str = """Optional[List[str]] - [Not Implemented Yet] List of active guardrails for the user"""
+    permissions_doc_str = """Optional[dict] - [Not Implemented Yet] User-specific permissions, eg. turning off pii masking."""
+    metadata_doc_str = """Optional[dict] - Metadata for user, store information for user. Example metadata = {"team": "core-infra", "app": "app2", "email": "ishaan@berri.ai" }"""
+    max_parallel_requests_doc_str = """Optional[int] - Rate limit a user based on the number of parallel requests. Raises 429 error, if user's parallel requests > x."""
+    soft_budget_doc_str = """Optional[float] - Get alerts when user crosses given budget, doesn't block requests."""
+    model_max_budget_doc_str = """Optional[dict] - Model-specific max budget for user. [Docs](https://docs.litellm.ai/docs/proxy/users#add-model-specific-budgets-to-keys)"""
+    model_rpm_limit_doc_str = """Optional[float] - Model-specific rpm limit for user. [Docs](https://docs.litellm.ai/docs/proxy/users#add-model-specific-limits-to-keys)"""
+    model_tpm_limit_doc_str = """Optional[float] - Model-specific tpm limit for user. [Docs](https://docs.litellm.ai/docs/proxy/users#add-model-specific-limits-to-keys)"""
+    spend_doc_str = """Optional[float] - Amount spent by user. Default is 0. Will be updated by proxy whenever user is used."""
+    team_id_doc_str = """Optional[str] - [DEPRECATED PARAM] The team id of the user. Default is None."""
+    duration_doc_str = """Optional[str] - Duration for the key auto-created on `/user/new`. Default is None."""
+
+
+PassThroughEndpointLoggingResultValues = Union[
+    ModelResponse,
+    TextCompletionResponse,
+    ImageResponse,
+    EmbeddingResponse,
+    StandardPassThroughResponseObject,
+]
+
+
+class PassThroughEndpointLoggingTypedDict(TypedDict):
+    result: Optional[PassThroughEndpointLoggingResultValues]
+    kwargs: dict
+
+
+LiteLLM_ManagementEndpoint_MetadataFields = [
+    "model_rpm_limit",
+    "model_tpm_limit",
+    "guardrails",
+    "tags",
+    "enforced_params",
+]
+
+
+class ProviderBudgetResponseObject(LiteLLMBase):
+    """
+    Configuration for a single provider's budget settings
+    """
+
+    budget_limit: float  # Budget limit in USD for the time period
+    time_period: str  # Time period for budget (e.g., '1d', '30d', '1mo')
+    spend: float = 0.0  # Current spend for this provider
+    budget_reset_at: Optional[str] = None  # When the current budget period resets
+
+
+class ProviderBudgetResponse(LiteLLMBase):
+    """
+    Complete provider budget configuration and status.
+    Maps provider names to their budget configs.
+    """
+
+    providers: Dict[str, ProviderBudgetResponseObject] = (
+        {}
+    )  # Dictionary mapping provider names to their budget configurations

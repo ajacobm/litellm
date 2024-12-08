@@ -1,5 +1,9 @@
 import types
-from typing import Literal, Optional, Union
+from typing import Literal, Optional, Tuple, Union
+
+from litellm.secret_managers.main import get_secret_str
+
+from ..embed.fireworks_ai_transformation import FireworksAIEmbeddingConfig
 
 
 class FireworksAIConfig:
@@ -21,6 +25,7 @@ class FireworksAIConfig:
     stop: Optional[Union[str, list]] = None
     response_format: Optional[dict] = None
     user: Optional[str] = None
+    logprobs: Optional[int] = None
 
     # Non OpenAI parameters - Fireworks AI only params
     prompt_truncate_length: Optional[int] = None
@@ -40,6 +45,7 @@ class FireworksAIConfig:
         stop: Optional[Union[str, list]] = None,
         response_format: Optional[dict] = None,
         user: Optional[str] = None,
+        logprobs: Optional[int] = None,
         prompt_truncate_length: Optional[int] = None,
         context_length_exceeded_behavior: Optional[Literal["error", "truncate"]] = None,
     ) -> None:
@@ -82,6 +88,7 @@ class FireworksAIConfig:
             "stop",
             "response_format",
             "user",
+            "logprobs",
             "prompt_truncate_length",
             "context_length_exceeded_behavior",
         ]
@@ -101,9 +108,37 @@ class FireworksAIConfig:
                 else:
                     # pass through the value of tool choice
                     optional_params["tool_choice"] = value
+            elif (
+                param == "response_format" and value.get("type", None) == "json_schema"
+            ):
+                optional_params["response_format"] = {
+                    "type": "json_object",
+                    "schema": value["json_schema"]["schema"],
+                }
             elif param == "max_completion_tokens":
                 optional_params["max_tokens"] = value
             elif param in supported_openai_params:
                 if value is not None:
                     optional_params[param] = value
         return optional_params
+
+    def _get_openai_compatible_provider_info(
+        self, model: str, api_base: Optional[str], api_key: Optional[str]
+    ) -> Tuple[str, Optional[str], Optional[str]]:
+        if FireworksAIEmbeddingConfig().is_fireworks_embedding_model(model=model):
+            # fireworks embeddings models do not require accounts/fireworks prefix https://docs.fireworks.ai/api-reference/creates-an-embedding-vector-representing-the-input-text
+            pass
+        elif not model.startswith("accounts/"):
+            model = f"accounts/fireworks/models/{model}"
+        api_base = (
+            api_base
+            or get_secret_str("FIREWORKS_API_BASE")
+            or "https://api.fireworks.ai/inference/v1"
+        )  # type: ignore
+        dynamic_api_key = api_key or (
+            get_secret_str("FIREWORKS_API_KEY")
+            or get_secret_str("FIREWORKS_AI_API_KEY")
+            or get_secret_str("FIREWORKSAI_API_KEY")
+            or get_secret_str("FIREWORKS_AI_TOKEN")
+        )
+        return model, api_base, dynamic_api_key

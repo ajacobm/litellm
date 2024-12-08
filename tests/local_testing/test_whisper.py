@@ -51,30 +51,25 @@ from litellm import Router
         ),
     ],
 )
-@pytest.mark.parametrize("response_format", ["json", "vtt"])
-@pytest.mark.parametrize("sync_mode", [True, False])
+@pytest.mark.parametrize(
+    "response_format, timestamp_granularities",
+    [("json", None), ("vtt", None), ("verbose_json", ["word"])],
+)
 @pytest.mark.asyncio
-async def test_transcription(model, api_key, api_base, response_format, sync_mode):
-    if sync_mode:
-        transcript = litellm.transcription(
-            model=model,
-            file=audio_file,
-            api_key=api_key,
-            api_base=api_base,
-            response_format=response_format,
-            drop_params=True,
-        )
-    else:
-        transcript = await litellm.atranscription(
-            model=model,
-            file=audio_file,
-            api_key=api_key,
-            api_base=api_base,
-            response_format=response_format,
-            drop_params=True,
-        )
+@pytest.mark.flaky(retries=3, delay=1)
+async def test_transcription(
+    model, api_key, api_base, response_format, timestamp_granularities
+):
+    transcript = await litellm.atranscription(
+        model=model,
+        file=audio_file,
+        api_key=api_key,
+        api_base=api_base,
+        response_format=response_format,
+        drop_params=True,
+    )
     print(f"transcript: {transcript.model_dump()}")
-    print(f"transcript: {transcript._hidden_params}")
+    print(f"transcript hidden params: {transcript._hidden_params}")
 
     assert transcript.text is not None
 

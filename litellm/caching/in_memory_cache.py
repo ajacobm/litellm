@@ -63,7 +63,7 @@ class InMemoryCache(BaseCache):
             self.evict_cache()
 
         self.cache_dict[key] = value
-        if "ttl" in kwargs:
+        if "ttl" in kwargs and kwargs["ttl"] is not None:
             self.ttl_dict[key] = time.time() + kwargs["ttl"]
         else:
             self.ttl_dict[key] = time.time() + self.default_ttl
@@ -145,3 +145,9 @@ class InMemoryCache(BaseCache):
     def delete_cache(self, key):
         self.cache_dict.pop(key, None)
         self.ttl_dict.pop(key, None)
+
+    async def async_get_ttl(self, key: str) -> Optional[int]:
+        """
+        Get the remaining TTL of a key in in-memory cache
+        """
+        return self.ttl_dict.get(key, None)

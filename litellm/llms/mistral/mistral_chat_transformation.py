@@ -7,7 +7,10 @@ Docs - https://docs.mistral.ai/api/
 """
 
 import types
-from typing import List, Literal, Optional, Union
+from typing import List, Literal, Optional, Tuple, Union
+
+from litellm.secret_managers.main import get_secret_str
+from litellm.types.llms.openai import AllMessageValues
 
 
 class MistralConfig:
@@ -124,3 +127,81 @@ class MistralConfig:
             if param == "response_format":
                 optional_params["response_format"] = value
         return optional_params
+
+    def _get_openai_compatible_provider_info(
+        self, api_base: Optional[str], api_key: Optional[str]
+    ) -> Tuple[Optional[str], Optional[str]]:
+        # mistral is openai compatible, we just need to set this to custom_openai and have the api_base be https://api.mistral.ai
+        api_base = (
+            api_base
+            or get_secret_str("MISTRAL_AZURE_API_BASE")  # for Azure AI Mistral
+            or "https://api.mistral.ai/v1"
+        )  # type: ignore
+
+        # if api_base does not end with /v1 we add it
+        if api_base is not None and not api_base.endswith(
+            "/v1"
+        ):  # Mistral always needs a /v1 at the end
+            api_base = api_base + "/v1"
+        dynamic_api_key = (
+            api_key
+            or get_secret_str("MISTRAL_AZURE_API_KEY")  # for Azure AI Mistral
+            or get_secret_str("MISTRAL_API_KEY")
+        )
+        return api_base, dynamic_api_key
+
+    @classmethod
+    def _transform_messages(cls, messages: List[AllMessageValues]):
+        """
+        - handles scenario where content is list and not string
+        - content list is just text, and no images
+        - if image passed in, then just return as is (user-intended)
+        - if `name` is passed, then drop it for mistral API: https://github.com/BerriAI/litellm/issues/6696
+
+        Motivation: mistral api doesn't support content as a list
+        """
+        new_messages = []
+        for m in messages:
+            special_keys = ["role", "content", "tool_calls", "function_call"]
+            extra_args = {}
+            if isinstance(m, dict):
+                for k, v in m.items():
+                    if k not in special_keys:
+                        extra_args[k] = v
+            texts = ""
+            _content = m.get("content")
+            if _content is not None and isinstance(_content, list):
+                for c in _content:
+                    _text: Optional[str] = c.get("text")
+                    if c["type"] == "image_url":
+                        return messages
+                    elif c["type"] == "text" and isinstance(_text, str):
+                        texts += _text
+            elif _content is not None and isinstance(_content, str):
+                texts = _content
+
+            new_m = {"role": m["role"], "content": texts, **extra_args}
+
+            if m.get("tool_calls"):
+                new_m["tool_calls"] = m.get("tool_calls")
+
+            new_m = cls._handle_name_in_message(new_m)
+
+            new_messages.append(new_m)
+        return new_messages
+
+    @classmethod
+    def _handle_name_in_message(cls, message: dict) -> dict:
+        """
+        Mistral API only supports `name` in tool messages
+
+        If role == tool, then we keep `name`
+        Otherwise, we drop `name`
+        """
+        if message.get("name") is not None:
+            if message["role"] == "tool":
+                message["name"] = message.get("name")
+            else:
+                message.pop("name", None)
+
+        return message

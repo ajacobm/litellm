@@ -9,7 +9,7 @@ import httpx
 from openai import OpenAI
 
 import litellm
-from litellm.llms.cohere.embed import embedding as cohere_embedding
+from litellm.llms.cohere.embed.handler import embedding as cohere_embedding
 from litellm.llms.custom_httpx.http_handler import (
     AsyncHTTPHandler,
     HTTPHandler,
@@ -74,7 +74,10 @@ class AzureAIEmbedding(OpenAIChatCompletion):
         client: Optional[Union[HTTPHandler, AsyncHTTPHandler]] = None,
     ) -> EmbeddingResponse:
         if client is None or not isinstance(client, AsyncHTTPHandler):
-            client = AsyncHTTPHandler(timeout=timeout, concurrent_limit=1)
+            client = get_async_httpx_client(
+                llm_provider=litellm.LlmProviders.AZURE_AI,
+                params={"timeout": timeout},
+            )
 
         url = "{}/images/embeddings".format(api_base)
 
@@ -216,6 +219,7 @@ class AzureAIEmbedding(OpenAIChatCompletion):
         api_base: Optional[str] = None,
         client=None,
         aembedding=None,
+        max_retries: Optional[int] = None,
     ) -> litellm.EmbeddingResponse:
         """
         - Separate image url from text

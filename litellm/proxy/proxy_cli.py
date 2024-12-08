@@ -125,7 +125,7 @@ def is_port_in_use(port):
 )
 @click.option(
     "--request_timeout",
-    default=600,
+    default=6000,
     type=int,
     help="Set timeout in seconds for completion calls",
 )
@@ -152,6 +152,12 @@ def is_port_in_use(port):
     default=True,
     type=bool,
     help="Helps us know if people are using this feature. Turn this off by doing `--telemetry False`",
+)
+@click.option(
+    "--log_config",
+    default=None,
+    type=str,
+    help="Path to the logging configuration file",
 )
 @click.option(
     "--version",
@@ -249,6 +255,7 @@ def run_server(  # noqa: PLR0915
     run_hypercorn,
     ssl_keyfile_path,
     ssl_certfile_path,
+    log_config,
 ):
     args = locals()
     if local:
@@ -258,7 +265,6 @@ def run_server(  # noqa: PLR0915
             ProxyConfig,
             app,
             load_aws_kms,
-            load_aws_secret_manager,
             load_from_azure_key_vault,
             load_google_kms,
             save_worker_config,
@@ -271,7 +277,6 @@ def run_server(  # noqa: PLR0915
                 ProxyConfig,
                 app,
                 load_aws_kms,
-                load_aws_secret_manager,
                 load_from_azure_key_vault,
                 load_google_kms,
                 save_worker_config,
@@ -288,7 +293,6 @@ def run_server(  # noqa: PLR0915
                     ProxyConfig,
                     app,
                     load_aws_kms,
-                    load_aws_secret_manager,
                     load_from_azure_key_vault,
                     load_google_kms,
                     save_worker_config,
@@ -552,8 +556,14 @@ def run_server(  # noqa: PLR0915
                         key_management_system
                         == KeyManagementSystem.AWS_SECRET_MANAGER.value  # noqa: F405
                     ):
+                        from litellm.secret_managers.aws_secret_manager_v2 import (
+                            AWSSecretsManagerV2,
+                        )
+
                         ### LOAD FROM AWS SECRET MANAGER ###
-                        load_aws_secret_manager(use_aws_secret_manager=True)
+                        AWSSecretsManagerV2.load_aws_secret_manager(
+                            use_aws_secret_manager=True
+                        )
                     elif key_management_system == KeyManagementSystem.AWS_KMS.value:
                         load_aws_kms(use_aws_kms=True)
                     elif (
@@ -687,28 +697,32 @@ def run_server(  # noqa: PLR0915
 
         import litellm
 
+        if detailed_debug is True:
+            litellm._turn_on_debug()
+
         # DO NOT DELETE - enables global variables to work across files
         from litellm.proxy.proxy_server import app  # noqa
+
+        uvicorn_args = {
+            "app": app,
+            "host": host,
+            "port": port,
+        }
+        if log_config is not None:
+            print(f"Using log_config: {log_config}")  # noqa
+            uvicorn_args["log_config"] = log_config
+        elif litellm.json_logs:
+            print("Using json logs. Setting log_config to None.")  # noqa
+            uvicorn_args["log_config"] = None
 
         if run_gunicorn is False and run_hypercorn is False:
             if ssl_certfile_path is not None and ssl_keyfile_path is not None:
                 print(  # noqa
                     f"\033[1;32mLiteLLM Proxy: Using SSL with certfile: {ssl_certfile_path} and keyfile: {ssl_keyfile_path}\033[0m\n"  # noqa
                 )
-                uvicorn.run(
-                    app,
-                    host=host,
-                    port=port,
-                    ssl_keyfile=ssl_keyfile_path,
-                    ssl_certfile=ssl_certfile_path,
-                )  # run uvicorn
-            else:
-                if litellm.json_logs:
-                    uvicorn.run(
-                        app, host=host, port=port, log_config=None
-                    )  # run uvicorn w/ json
-                else:
-                    uvicorn.run(app, host=host, port=port)  # run uvicorn
+                uvicorn_args["ssl_keyfile"] = ssl_keyfile_path
+                uvicorn_args["ssl_certfile"] = ssl_certfile_path
+            uvicorn.run(**uvicorn_args)
         elif run_gunicorn is True:
             # Gunicorn Application Class
             class StandaloneApplication(gunicorn.app.base.BaseApplication):
